@@ -1,0 +1,12 @@
+$ codex --dangerously-bypass-approvals-and-sandbox   (cwd: /Users/codypjohnson, update-check off via -c)
+
+
+  Hooks need review
+  11 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+
+  Press enter to confirm or esc to go back

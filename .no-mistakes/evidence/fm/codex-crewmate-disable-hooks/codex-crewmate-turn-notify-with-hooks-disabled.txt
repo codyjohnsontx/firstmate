@@ -1,0 +1,30 @@
+$ codex -c model_reasoning_effort=low --dangerously-bypass-approvals-and-sandbox --disable hooks -c notify=["bash","-c","touch /var/folders/pr/m0w1fnts5tjbg64d_spbb53c0000gn/T/tmp.ytT9kgrdMf/turnend"] Reply with only the word OK. Do not run any tools.   (cwd: /Users/codypjohnson, update-check off via -c)
+
+╭─────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.151.0)                      │
+│                                                 │
+│ model:       gpt-5.6-sol low   /model to change │
+│ directory:   ~                                  │
+│ permissions: YOLO mode                          │
+╰─────────────────────────────────────────────────╯
+
+  Tip: Try the Desktop app. Run 'codex app' or visit https://chatgpt.com/codex?app-landing-page=true
+
+
+› Reply with only the word OK. Do not run any tools.
+
+
+• You have 3 usage limit resets available. Run /usage to use one.
+
+• Session renamed to Reply with only the word OK. Do not. To resume this session run codex resume, then select Reply
+with only the word OK. Do not (01a0ad74-4e09-7522-b167-5ec3380aeb5a)
+
+• OK
+
+
+› Ask Codex to do anything
+
+  gpt-5.6-sol low · ~
+
+--- turn-end marker after launch:
+-rw-r--r--@ 1 codypjohnson  staff  0 Sep 16 22:41 /var/folders/pr/m0w1fnts5tjbg64d_spbb53c0000gn/T/tmp.ytT9kgrdMf/turnend
