@@ -1,0 +1,39 @@
+== S5 forge answers HTTP 404 on every poll (nonexistent PR): wakes once, on the 2nd consecutive failure
+---- poll: 404 #1
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/99999999","checked_at":"2026-09-25T21:24:43Z","error":"forge observation unavailable: core: gh: Not Found (HTTP 404)","failures":1,"missed_at":null}
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:24:43Z","error":null,"failures":0,"missed_at":null}
+---- poll: 404 #2
+exit=0
+stdout (wake lines): contributions: observation unavailable for https://github.com/Moonfin-Client/Moonfin-Core/pull/99999999 (core: gh: Not Found (HTTP 404))
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/99999999","checked_at":"2026-09-25T21:34:43Z","error":"forge observation unavailable: core: gh: Not Found (HTTP 404)","failures":2,"missed_at":null}
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:34:43Z","error":null,"failures":0,"missed_at":null}
+---- poll: 404 #3
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/99999999","checked_at":"2026-09-25T21:44:43Z","error":"forge observation unavailable: core: gh: Not Found (HTTP 404)","failures":3,"missed_at":null}
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:44:43Z","error":null,"failures":0,"missed_at":null}
+
+== S6 authentication refusal (no gh login) is unavailable, not a miss
+---- poll: no-auth #1
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:54:43Z","error":"forge observation unavailable: core: To get started with GitHub CLI, please run:  gh auth login","failures":1,"missed_at":null}
+(restore with a good poll)
+---- poll: good
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T22:04:43Z","error":null,"failures":0,"missed_at":null}
+
+== S7 baseline repro: base commit 1a814e4 against the same no-network condition
+---- poll: BASE no-network
+exit=0
+stdout (wake lines): contributions: observation unavailable for https://github.com/Moonfin-Client/Moonfin-Core/pull/1621
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T22:14:43Z","error":"forge observation unavailable or changed during read"}
+---- poll: BASE network back
+exit=0
+stdout (wake lines): <none>
+---- poll: BASE no-network again
+exit=0
+stdout (wake lines): contributions: observation unavailable for https://github.com/Moonfin-Client/Moonfin-Core/pull/1621

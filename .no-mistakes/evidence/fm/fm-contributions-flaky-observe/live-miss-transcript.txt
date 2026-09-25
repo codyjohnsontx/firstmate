@@ -1,0 +1,40 @@
+== S1 healthy PR: real gh, network up
+---- poll: healthy
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:14:16Z","error":null,"failures":0,"missed_at":null,"state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+
+== S2 host has no network (refused proxy) - three consecutive polls
+---- poll: no-network #1
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:14:16Z","error":null,"failures":0,"missed_at":"2026-09-25T21:24:16Z","state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+---- poll: no-network #2
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:14:16Z","error":null,"failures":0,"missed_at":"2026-09-25T21:34:16Z","state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+---- poll: no-network #3
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:14:16Z","error":null,"failures":0,"missed_at":"2026-09-25T21:44:16Z","state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+
+== S3 coverage view after a long miss streak (clock +3600s, max age 900)
+{"known":1,"checked":0,"fleet":null,"rows":[{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","fresh":null,"actor":"fleet","reason":"contribution not recently checked"}]}
+
+== S4 the reported flip pattern: miss, success, miss, success
+---- poll: no-network
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T21:14:16Z","error":null,"failures":0,"missed_at":"2026-09-25T22:24:16Z","state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+---- poll: network back
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T22:34:16Z","error":null,"failures":0,"missed_at":null,"state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+---- poll: no-network
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T22:34:16Z","error":null,"failures":0,"missed_at":"2026-09-25T22:44:16Z","state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
+---- poll: network back
+exit=0
+stdout (wake lines): <none>
+{"url":"https://github.com/Moonfin-Client/Moonfin-Core/pull/1621","checked_at":"2026-09-25T22:54:16Z","error":null,"failures":0,"missed_at":null,"state":"open","head":"1958d54381afb4e50f421749a2a7e1a8c39c0366"}
