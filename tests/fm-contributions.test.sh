@@ -577,8 +577,7 @@ case "$fault:$*" in
   stall:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   noauth:*) printf 'To get started with GitHub CLI, please run:  gh auth login\n' >&2; exit 4 ;;
   garbled:*) printf 'unexpected end of JSON input\n' >&2; exit 1 ;;
-  wave-offline:'api repos/o/r/pulls/8/reviews?'*) printf 'error connecting to api.github.com\n' >&2; exit 1 ;;
-  starve:'api repos/o/r/pulls/8/reviews?'*)
+  starve:'api repos/o/r/pulls/8')
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock"
     printf 'error connecting to api.github.com\n' >&2; exit 1 ;;
 esac
@@ -861,74 +860,30 @@ test_transient_read_failure_is_reread_within_the_poll() { # one 502, then one he
 
 test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, and the per-read cap
   local mode home out
-  for mode in offline unreachable wave-offline stall; do
+  for mode in offline unreachable stall; do
     home=$(new_home "miss-$mode")
     forge_home "$home"
     wrap_forge "$home"
-    mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T07:00:00Z"'
+    mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
     cp "$home/data/delivery/contributions.json" "$home/prior.json"
     printf '%s\n' "$mode" > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed on an unanswered read ($mode)"
     [ -z "$out" ] || fail "an unanswered read woke ($mode): $out"
-    case "$mode" in
-      # No read in the poll reached the forge: the host had no network.
-      offline|unreachable)
-        jq -e --slurpfile prior "$home/prior.json" '.records[0] == $prior[0].records[0]' \
-          "$home/data/delivery/contributions.json" >/dev/null \
-          || fail "a poll without network changed the record ($mode): $(cat "$home/data/delivery/contributions.json")" ;;
-      *)
-        jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
-          .records[0] | .missed_since == $now and .missed_at == $now
-          and (del(.missed_since, .missed_at) == ($prior[0].records[0] | del(.missed_since, .missed_at)))' \
-          "$home/data/delivery/contributions.json" >/dev/null \
-          || fail "an unanswered read ($mode) changed the record beyond its miss note: $(cat "$home/data/delivery/contributions.json")" ;;
-    esac
+    jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
+      .records[0] | .missed_at == $now
+      and (del(.missed_at) == ($prior[0].records[0] | del(.missed_at)))' \
+      "$home/data/delivery/contributions.json" >/dev/null \
+      || fail "an unanswered read ($mode) changed the record beyond its miss note: $(cat "$home/data/delivery/contributions.json")"
     [ ! -s "$home/state/.wake-queue" ] || fail "an unanswered read enqueued a wake ($mode)"
     bearings "$home" | jq -e '.contributions.checked == 0 and .contributions.counts.fleet == 1' >/dev/null \
       || fail "an expired record with a missed read counted as checked coverage ($mode)"
     : > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed after a miss ($mode)"
     [ -z "$out" ] || fail "a successful read after a miss printed ($mode): $out"
-    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .missed_since == null and .missed_at == null' \
+    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .missed_at == null' \
       "$home/data/delivery/contributions.json" >/dev/null || fail "a successful read did not clear the miss ($mode)"
   done
   pass 'a read the forge never answered is unmeasured: the record stands, its miss is noted, and nothing wakes'
-}
-
-test_persistent_miss_wakes_once_past_the_bound() {
-  local home out at line='contributions: observation unavailable for https://github.com/o/r/pull/8 (reviews: error connecting to api.github.com)'
-  home=$(new_home miss-bound)
-  forge_home "$home"
-  wrap_forge "$home"
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
-  # A weekend of dark wakes: every read in every poll fails to connect.
-  printf 'offline\n' > "$home/forge/fault"
-  for at in 2026-09-16T20:00:00Z 2026-09-17T08:00:00Z 2026-09-17T20:01:00Z 2026-09-18T08:00:00Z; do
-    out=$(poll_at "$at")
-    [ -z "$out" ] || fail "a dark-wake poll without network woke at $at: $out"
-  done
-  jq -e --slurpfile prior "$home/prior.json" '.records[0] == $prior[0].records[0]' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'dark-wake polls without network started a miss streak'
-  # The network works, but one read of this URL keeps getting no answer.
-  printf 'wave-offline\n' > "$home/forge/fault"
-  for at in 2026-09-18T09:00:00Z 2026-09-19T08:59:00Z; do
-    out=$(poll_at "$at")
-    [ -z "$out" ] || fail "a miss streak within a day woke at $at: $out"
-  done
-  out=$(poll_at 2026-09-19T09:01:00Z)
-  [ "$out" = "$line" ] || fail "a miss streak past the bound did not wake: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null
-    and .missed_since == "2026-09-18T09:00:00Z" and .missed_at == "2026-09-19T09:01:00Z"' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'the escalating miss changed the record beyond its streak'
-  out=$(poll_at 2026-09-19T10:00:00Z)
-  [ -z "$out" ] || fail "a persistent miss woke twice in one streak: $out"
-  : > "$home/forge/fault"
-  out=$(poll_at 2026-09-19T11:00:00Z)
-  [ -z "$out" ] || fail "a successful read after the streak printed: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-19T11:00:00Z" and .missed_since == null and .missed_at == null' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read did not end the miss streak'
-  pass 'polls without network never build a miss streak; a streak with network past a day wakes once'
 }
 
 test_missed_url_rotates_behind_measured_urls() {
@@ -962,7 +917,7 @@ test_miss_keeps_the_failure_count() {
   printf 'down\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ -z "$out" ] || fail "a first failure woke: $out"
-  printf 'wave-offline\n' > "$home/forge/fault"
+  printf 'offline\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "a miss between failures woke: $out"
   jq -e '.records[0] | .checked_at == "2026-09-16T09:00:00Z" and .failures == 1
@@ -1022,15 +977,15 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
   rm "$home/fakebin/gh"
   gh_home="$home/gh-home"
   mkdir -p "$gh_home"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T07:00:00Z"'
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   # A refused proxy keeps every read off the network; the bogus token keeps gh from asking for one.
   out=$(with_home "$home" env -u GITHUB_TOKEN -u NO_PROXY -u no_proxy HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
     GH_TOKEN=ghp_firstmatetest HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed through a refused proxy'
   [ -z "$out" ] || fail "an unreachable forge woke: $out"
-  jq -e '.records[0] | .error == null and .checked_at == "2026-09-16T07:00:00Z" and .missed_since == null and .missed_at == null' \
+  jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == "2026-09-15T08:00:00Z" and .missed_at == $now' \
     "$home/data/delivery/contributions.json" >/dev/null \
-    || fail "gh's dial failure without network changed the record: $(cat "$home/data/delivery/contributions.json")"
+    || fail "gh's dial failure was not a miss: $(cat "$home/data/delivery/contributions.json")"
   out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed without gh authentication'
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
@@ -1038,7 +993,7 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
     and (.error | startswith("forge observation unavailable: core: ") and contains("gh auth login"))' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "gh's authentication refusal was not unavailable: $(cat "$home/data/delivery/contributions.json")"
-  pass 'real gh: a dial failure without network changes nothing and an authentication refusal is unavailable'
+  pass 'real gh: a dial failure is a miss and an authentication refusal is unavailable'
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
@@ -1076,7 +1031,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_persistent_miss_wakes_once_past_the_bound test_missed_url_rotates_behind_measured_urls test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_missed_url_rotates_behind_measured_urls test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

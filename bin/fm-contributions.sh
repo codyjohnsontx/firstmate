@@ -19,9 +19,8 @@
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, notified tokens,
-# failures (the URL's consecutive unavailable observations), and missed_since
-# and missed_at (the first and latest unmeasured reads since the last measured
-# one).
+# failures (the URL's consecutive unavailable observations) and missed_at (the
+# time of the last unmeasured read since the last completed observation).
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -53,15 +52,11 @@
 # dark wakes reach no network), so a miss is unmeasured, never a failure.
 # Every other failed read is unavailable: an HTTP or GraphQL error, an
 # authentication refusal, malformed data, or a gh that cannot run the read.
-# A poll in which no read succeeded or got an HTTP or GraphQL answer shows
-# the host had no usable network: its misses prove nothing about the forge
-# and leave every record untouched. Misses are applied after the poll's
-# reads, once any of them shows the network worked.
 # A failed observation is re-read once within the same poll when the
 # reservation still fits; the second outcome is the poll's. A miss leaves
-# every owner's record untouched except missed_since and missed_at, so the
-# observation ages into "not recently checked" fleet work while poll order
-# counts the miss as an attempt and reads measured URLs first. An unavailable
+# every owner's record untouched except missed_at, so the observation ages
+# into "not recently checked" fleet work while poll order counts the miss as
+# an attempt and reads measured URLs first. An unavailable
 # read records checked_at, error naming the read and the forge's answer, and
 # failures, the URL's consecutive unavailable observations applied to every
 # owner; a miss leaves that count alone.
@@ -72,12 +67,12 @@
 # The unavailable line prints only when failures reaches exactly two, the
 # second consecutive unavailable observation, so one flaky read never wakes
 # firstmate while a persistent failure still does; a record whose error
-# predates the count is treated as already announced. A URL that keeps
-# missing prints the same line once per miss streak, on the first later miss
-# more than 24 hours after the streak's first miss, so a single miss after a
-# long gap stays quiet while a read that never gets an answer still surfaces.
-# A measured read ends either episode and clears missed_since and missed_at;
-# a successful one also clears error and failures.
+# predates the count is treated as already announced. A miss never wakes,
+# however long it persists: a read that never gets an answer stays quiet and
+# surfaces through the fleet digest's coverage view instead, as bearings'
+# checked/known coverage and "not recently checked" fleet work. Any completed
+# observation clears missed_at; a successful read also ends the failure
+# episode and clears error and failures.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -227,7 +222,7 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  [ "$rc" -ne 0 ] || { : > "$TMP/network-up"; return 0; }
+  [ "$rc" -ne 0 ] || return 0
   name=$(basename "$forge_err" .err)
   if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
     # A read killed at the budget's own deadline is budget exhaustion too.
@@ -240,7 +235,6 @@ forge() {
     # Anything else is a failure the fleet must see: an HTTP or GraphQL
     # answer, an authentication refusal, or a broken local forge CLI.
     forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-unavailable"
-    ! grep -Eq 'HTTP [1-5][0-9]{2}|GraphQL' "$forge_err" || : > "$TMP/network-up"
   fi
   return "$rc"
 }
@@ -376,74 +370,17 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,failures:0,missed_since:null,missed_at:null,pending:[],notified:[]}' > "$TMP/row.json"
+        $final[0] + {error:null,failures:0,missed_at:null,pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
-      jq '.error = null | .failures = 0 | .missed_since = null | .missed_at = null' "$TMP/old.json" > "$TMP/row.json"
+      jq '.error = null | .failures = 0 | .missed_at = null' "$TMP/old.json" > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
-  done
-}
-
-record_outcome() { # observed reason url task...: apply one URL's outcome to every owner
-  local observed=$1 reason=$2 url=$3 failures=0 task old kind
-  shift 3
-  case "$observed" in
-    0) ;;
-    1)
-      # The URL's consecutive unavailable observations, shared by every
-      # owner; a record whose error predates the count was announced under
-      # the earlier once-per-error contract, so it never re-announces.
-      failures=$(jq -nr --slurpfile saved "$TMP/saved.json" --arg url "$url" --args '
-        [$ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first
-         | if . == null or .error == null then 0 else (.failures // 2) end] | max + 1' "$@")
-      # Wake once per failure episode, on its second consecutive failure.
-      [ "$failures" -ne 2 ] || printf 'contributions: observation unavailable for %s (%s)\n' "$url" "${reason:-forge read failed}"
-      ;;
-    *)
-      # Wake once per miss streak, on its first later miss past the bound.
-      if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --argjson now "$EPOCH" --args '
-        [$ARGS.positional[] as $task | $saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] as $records
-        | ([$records[].missed_since | values | fromdateiso8601] | min) as $since
-        | ([$records[].missed_at | values | fromdateiso8601] | max) as $last
-        | $since != null and $last != null and $now - $since > 86400 and $last - $since <= 86400' \
-        "$@" >/dev/null; then
-        printf 'contributions: observation unavailable for %s (%s)\n' "$url" "${reason:-forge read missed}"
-      fi
-      ;;
-  esac
-  case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
-  for task in "$@"; do
-    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
-    old="$TMP/old.json"
-    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
-      ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
-      // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
-    if [ "$observed" -eq 0 ]; then
-      jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
-        $old[0] as $old | $observation[0] as $o
-        | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
-            [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-            else [] end)) as $events
-        | $old + {checked_at:$now,error:null,failures:0,missed_since:null,missed_at:null,
-          observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
-          seen:($events | map(.token)),
-          pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
-    elif [ "$observed" -eq 1 ]; then
-      jq --arg now "$NOW" --arg reason "${reason:-forge read failed}" --argjson failures "$failures" \
-        '.checked_at=$now | .error=("forge observation unavailable: " + $reason) | .failures=$failures | .missed_since=null | .missed_at=null' \
-        "$old" > "$TMP/row.json"
-    else
-      # Unmeasured: the prior observation and its failure count stand.
-      jq --arg now "$NOW" '.missed_since=(.missed_since // $now) | .missed_at=$now' "$old" > "$TMP/row.json"
-    fi
-    write_record "$task" "$TMP/row.json"
-    publish_pending "$task" "$url" "$TMP/row.json"
   done
 }
 
 poll() {
-  local url observed
+  local task url old kind observed reason failures
   local -a row
   acquire
   get_input
@@ -480,18 +417,51 @@ poll() {
       observe "$url" || observed=$?
       [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
     fi
-    if [ "$observed" -eq 2 ]; then
-      # A miss counts only once the poll shows the host reached the network.
-      printf '%s\t%s\n' "$(head -n 1 "$TMP/forge-missed" 2>/dev/null || true)" "$(IFS=$'\t'; printf '%s' "${row[*]}")" >> "$TMP/missed.tsv"
-      continue
-    fi
-    record_outcome "$observed" "$(head -n 1 "$TMP/forge-unavailable" 2>/dev/null || true)" "${row[@]}"
+    reason=
+    failures=0
+    case "$observed" in
+      0) ;;
+      1)
+        reason=$(head -n 1 "$TMP/forge-unavailable" 2>/dev/null || true)
+        # The URL's consecutive unavailable observations, shared by every
+        # owner; a record whose error predates the count was announced under
+        # the earlier once-per-error contract, so it never re-announces.
+        failures=$(jq -nr --slurpfile saved "$TMP/saved.json" --arg url "$url" --args '
+          [$ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first
+           | if . == null or .error == null then 0 else (.failures // 2) end] | max + 1' "${row[@]:1}")
+        # Wake once per failure episode, on its second consecutive failure.
+        [ "$failures" -ne 2 ] || printf 'contributions: observation unavailable for %s (%s)\n' "$url" "${reason:-forge read failed}"
+        ;;
+    esac
+    case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
+    for task in "${row[@]:1}"; do
+      fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+      old="$TMP/old.json"
+      jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
+        ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
+        // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
+      if [ "$observed" -eq 0 ]; then
+        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+          $old[0] as $old | $observation[0] as $o
+          | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
+              [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
+              else [] end)) as $events
+          | $old + {checked_at:$now,error:null,failures:0,missed_at:null,
+            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            seen:($events | map(.token)),
+            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+      elif [ "$observed" -eq 1 ]; then
+        jq --arg now "$NOW" --arg reason "${reason:-forge read failed}" --argjson failures "$failures" \
+          '.checked_at=$now | .error=("forge observation unavailable: " + $reason) | .failures=$failures | .missed_at=null' \
+          "$old" > "$TMP/row.json"
+      else
+        # Unmeasured: the prior observation and its failure count stand.
+        jq --arg now "$NOW" '.missed_at=$now' "$old" > "$TMP/row.json"
+      fi
+      write_record "$task" "$TMP/row.json"
+      publish_pending "$task" "$url" "$TMP/row.json"
+    done
   done < "$TMP/known.tsv"
-  if [ -e "$TMP/network-up" ] && [ -e "$TMP/missed.tsv" ]; then
-    while IFS=$'\t' read -r -a row; do
-      record_outcome 2 "${row[@]}"
-    done < "$TMP/missed.tsv"
-  fi
 }
 
 arm() {

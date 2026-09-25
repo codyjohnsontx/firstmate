@@ -12,7 +12,6 @@ def valid_record:
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and ((.failures // 0) | type == "number")
-    and (.missed_since == null or (.missed_since | fromdateiso8601 | type == "number"))
     and (.missed_at == null or (.missed_at | fromdateiso8601 | type == "number"))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
