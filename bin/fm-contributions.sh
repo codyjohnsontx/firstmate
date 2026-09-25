@@ -54,7 +54,8 @@
 # authentication refusal, malformed data, or a gh that cannot run the read. A failed observation is re-read once within the same poll when the
 # reservation still fits; the second outcome is the poll's. A miss leaves
 # every owner's record untouched except a missed {at,reason} note, so the
-# observation ages into "not recently checked" fleet work. An unavailable
+# observation ages into "not recently checked" fleet work while poll order
+# counts the miss as an attempt and reads measured URLs first. An unavailable
 # read records checked_at, error naming the read and the forge's answer, and
 # failures, the URL's consecutive unavailable observations applied to every
 # owner; a miss leaves that count alone.
@@ -382,7 +383,7 @@ poll() {
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .missed.at // .checked_at] | first // "")})
     | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))

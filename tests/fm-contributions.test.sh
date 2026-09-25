@@ -577,6 +577,9 @@ case "$fault:$*" in
   stall:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   noauth:*) printf 'To get started with GitHub CLI, please run:  gh auth login\n' >&2; exit 4 ;;
   garbled:*) printf 'unexpected end of JSON input\n' >&2; exit 1 ;;
+  starve:'api repos/o/r/pulls/8')
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock"
+    printf 'error connecting to api.github.com\n' >&2; exit 1 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
 SH
@@ -888,6 +891,28 @@ test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, an
   pass 'a read the forge never answered is unmeasured: the record stands, its miss is noted, and nothing wakes'
 }
 
+test_missed_url_rotates_behind_measured_urls() {
+  local home
+  home=$(new_home miss-rotation)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail "poll at $1 failed"; }
+  poll_at 2026-09-16T08:00:00Z
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-16T07:00:00Z"'
+  /bin/date +%s > "$home/forge/clock"
+  printf 'starve\n' > "$home/forge/fault"
+  poll_at 2026-09-16T09:00:00Z
+  jq -e '.records[0] | .checked_at == "2026-09-16T07:00:00Z" and .missed.at == "2026-09-16T09:00:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the oldest PR was not read first and missed'
+  jq -e '.records[0].checked_at == "2026-09-16T08:00:00Z"' "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'the issue was read although the missed read left no reservation'
+  poll_at 2026-09-16T10:00:00Z
+  jq -e '.records[0].checked_at == "2026-09-16T10:00:00Z"' "$home/data/filed/contributions.json" >/dev/null \
+    || fail "a URL that keeps missing starved a measured URL: $(cat "$home/data/filed/contributions.json")"
+  pass 'a missed URL counts as attempted, so it cannot starve the other contributions'
+}
+
 test_miss_keeps_the_failure_count() {
   local home out
   home=$(new_home miss-between-failures)
@@ -1012,7 +1037,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_missed_url_rotates_behind_measured_urls test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
