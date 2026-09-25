@@ -870,8 +870,8 @@ test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, an
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed on an unanswered read ($mode)"
     [ -z "$out" ] || fail "an unanswered read woke ($mode): $out"
     jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
-      .records[0] | .missed_at == $now
-      and (del(.missed_at) == ($prior[0].records[0] | del(.missed_at)))' \
+      .records[0] | .missed_since == $now and .missed_at == $now
+      and (del(.missed_since, .missed_at) == ($prior[0].records[0] | del(.missed_since, .missed_at)))' \
       "$home/data/delivery/contributions.json" >/dev/null \
       || fail "an unanswered read ($mode) changed the record beyond its miss note: $(cat "$home/data/delivery/contributions.json")"
     [ ! -s "$home/state/.wake-queue" ] || fail "an unanswered read enqueued a wake ($mode)"
@@ -880,38 +880,44 @@ test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, an
     : > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed after a miss ($mode)"
     [ -z "$out" ] || fail "a successful read after a miss printed ($mode): $out"
-    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .missed_at == null' \
+    jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .missed_since == null and .missed_at == null' \
       "$home/data/delivery/contributions.json" >/dev/null || fail "a successful read did not clear the miss ($mode)"
   done
   pass 'a read the forge never answered is unmeasured: the record stands, its miss is noted, and nothing wakes'
 }
 
 test_persistent_miss_wakes_once_past_the_bound() {
-  local home out at line='contributions: observation unavailable for https://github.com/o/r/pull/8 (core: error connecting to api.github.com)'
+  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8 (core: error connecting to api.github.com)'
   home=$(new_home miss-bound)
   forge_home "$home"
   wrap_forge "$home"
   poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
   printf 'offline\n' > "$home/forge/fault"
-  for at in 2026-09-16T09:00:00Z 2026-09-17T07:59:00Z; do
-    out=$(poll_at "$at")
-    [ -z "$out" ] || fail "a miss within a day of the last measured observation woke at $at: $out"
-  done
-  out=$(poll_at 2026-09-17T08:01:00Z)
-  [ "$out" = "$line" ] || fail "a miss past the bound did not wake: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null and .missed_at == "2026-09-17T08:01:00Z"' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'the escalating miss changed the record beyond missed_at'
-  out=$(poll_at 2026-09-17T09:00:00Z)
-  [ -z "$out" ] || fail "a persistent miss woke twice in one unmeasured stretch: $out"
+  out=$(poll_at 2026-09-18T08:00:00Z)
+  [ -z "$out" ] || fail "a single miss after two days without a poll woke: $out"
+  jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null
+    and .missed_since == "2026-09-18T08:00:00Z" and .missed_at == "2026-09-18T08:00:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the first miss did not start a streak'
+  out=$(poll_at 2026-09-19T07:59:00Z)
+  [ -z "$out" ] || fail "a miss streak within a day woke: $out"
+  out=$(poll_at 2026-09-19T08:01:00Z)
+  [ "$out" = "$line" ] || fail "a miss streak past the bound did not wake: $out"
+  jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null
+    and .missed_since == "2026-09-18T08:00:00Z" and .missed_at == "2026-09-19T08:01:00Z"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'the escalating miss changed the record beyond its streak'
+  out=$(poll_at 2026-09-19T09:00:00Z)
+  [ -z "$out" ] || fail "a persistent miss woke twice in one streak: $out"
   : > "$home/forge/fault"
-  out=$(poll_at 2026-09-17T10:00:00Z)
-  [ -z "$out" ] || fail "a successful read after the stretch printed: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-17T10:00:00Z" and .missed_at == null' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read did not end the unmeasured stretch'
+  out=$(poll_at 2026-09-19T10:00:00Z)
+  [ -z "$out" ] || fail "a successful read after the streak printed: $out"
+  jq -e '.records[0] | .checked_at == "2026-09-19T10:00:00Z" and .missed_since == null and .missed_at == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read did not end the miss streak'
   printf 'offline\n' > "$home/forge/fault"
-  out=$(poll_at 2026-09-18T10:01:00Z)
-  [ "$out" = "$line" ] || fail "a new unmeasured stretch past the bound did not wake: $out"
-  pass 'a URL that keeps missing stays quiet for a day, then wakes once per unmeasured stretch'
+  out=$(poll_at 2026-09-19T11:00:00Z)
+  [ -z "$out" ] || fail "a new streak's first miss woke: $out"
+  out=$(poll_at 2026-09-20T11:01:00Z)
+  [ "$out" = "$line" ] || fail "a new miss streak past the bound did not wake: $out"
+  pass 'a single miss after a long sleep stays quiet; a miss streak past a day wakes once'
 }
 
 test_missed_url_rotates_behind_measured_urls() {
