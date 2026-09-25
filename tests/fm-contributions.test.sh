@@ -577,7 +577,8 @@ case "$fault:$*" in
   stall:'api repos/o/r/pulls/8/reviews?'*) sleep 6 ;;
   noauth:*) printf 'To get started with GitHub CLI, please run:  gh auth login\n' >&2; exit 4 ;;
   garbled:*) printf 'unexpected end of JSON input\n' >&2; exit 1 ;;
-  starve:'api repos/o/r/pulls/8')
+  wave-offline:'api repos/o/r/pulls/8/reviews?'*) printf 'error connecting to api.github.com\n' >&2; exit 1 ;;
+  starve:'api repos/o/r/pulls/8/reviews?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock"
     printf 'error connecting to api.github.com\n' >&2; exit 1 ;;
 esac
@@ -860,7 +861,7 @@ test_transient_read_failure_is_reread_within_the_poll() { # one 502, then one he
 
 test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, and the per-read cap
   local mode home out
-  for mode in offline unreachable stall; do
+  for mode in offline unreachable wave-offline stall; do
     home=$(new_home "miss-$mode")
     forge_home "$home"
     wrap_forge "$home"
@@ -869,11 +870,19 @@ test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, an
     printf '%s\n' "$mode" > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed on an unanswered read ($mode)"
     [ -z "$out" ] || fail "an unanswered read woke ($mode): $out"
-    jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
-      .records[0] | .missed_since == $now and .missed_at == $now
-      and (del(.missed_since, .missed_at) == ($prior[0].records[0] | del(.missed_since, .missed_at)))' \
-      "$home/data/delivery/contributions.json" >/dev/null \
-      || fail "an unanswered read ($mode) changed the record beyond its miss note: $(cat "$home/data/delivery/contributions.json")"
+    case "$mode" in
+      # No read in the poll reached the forge: the host had no network.
+      offline|unreachable)
+        jq -e --slurpfile prior "$home/prior.json" '.records[0] == $prior[0].records[0]' \
+          "$home/data/delivery/contributions.json" >/dev/null \
+          || fail "a poll without network changed the record ($mode): $(cat "$home/data/delivery/contributions.json")" ;;
+      *)
+        jq -e --arg now "$NOW" --slurpfile prior "$home/prior.json" '
+          .records[0] | .missed_since == $now and .missed_at == $now
+          and (del(.missed_since, .missed_at) == ($prior[0].records[0] | del(.missed_since, .missed_at)))' \
+          "$home/data/delivery/contributions.json" >/dev/null \
+          || fail "an unanswered read ($mode) changed the record beyond its miss note: $(cat "$home/data/delivery/contributions.json")" ;;
+    esac
     [ ! -s "$home/state/.wake-queue" ] || fail "an unanswered read enqueued a wake ($mode)"
     bearings "$home" | jq -e '.contributions.checked == 0 and .contributions.counts.fleet == 1' >/dev/null \
       || fail "an expired record with a missed read counted as checked coverage ($mode)"
@@ -887,37 +896,39 @@ test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure, an
 }
 
 test_persistent_miss_wakes_once_past_the_bound() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8 (core: error connecting to api.github.com)'
+  local home out at line='contributions: observation unavailable for https://github.com/o/r/pull/8 (reviews: error connecting to api.github.com)'
   home=$(new_home miss-bound)
   forge_home "$home"
   wrap_forge "$home"
+  cp "$home/data/delivery/contributions.json" "$home/prior.json"
   poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
+  # A weekend of dark wakes: every read in every poll fails to connect.
   printf 'offline\n' > "$home/forge/fault"
-  out=$(poll_at 2026-09-18T08:00:00Z)
-  [ -z "$out" ] || fail "a single miss after two days without a poll woke: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null
-    and .missed_since == "2026-09-18T08:00:00Z" and .missed_at == "2026-09-18T08:00:00Z"' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'the first miss did not start a streak'
-  out=$(poll_at 2026-09-19T07:59:00Z)
-  [ -z "$out" ] || fail "a miss streak within a day woke: $out"
-  out=$(poll_at 2026-09-19T08:01:00Z)
+  for at in 2026-09-16T20:00:00Z 2026-09-17T08:00:00Z 2026-09-17T20:01:00Z 2026-09-18T08:00:00Z; do
+    out=$(poll_at "$at")
+    [ -z "$out" ] || fail "a dark-wake poll without network woke at $at: $out"
+  done
+  jq -e --slurpfile prior "$home/prior.json" '.records[0] == $prior[0].records[0]' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'dark-wake polls without network started a miss streak'
+  # The network works, but one read of this URL keeps getting no answer.
+  printf 'wave-offline\n' > "$home/forge/fault"
+  for at in 2026-09-18T09:00:00Z 2026-09-19T08:59:00Z; do
+    out=$(poll_at "$at")
+    [ -z "$out" ] || fail "a miss streak within a day woke at $at: $out"
+  done
+  out=$(poll_at 2026-09-19T09:01:00Z)
   [ "$out" = "$line" ] || fail "a miss streak past the bound did not wake: $out"
   jq -e '.records[0] | .checked_at == "2026-09-16T08:00:00Z" and .error == null
-    and .missed_since == "2026-09-18T08:00:00Z" and .missed_at == "2026-09-19T08:01:00Z"' \
+    and .missed_since == "2026-09-18T09:00:00Z" and .missed_at == "2026-09-19T09:01:00Z"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'the escalating miss changed the record beyond its streak'
-  out=$(poll_at 2026-09-19T09:00:00Z)
+  out=$(poll_at 2026-09-19T10:00:00Z)
   [ -z "$out" ] || fail "a persistent miss woke twice in one streak: $out"
   : > "$home/forge/fault"
-  out=$(poll_at 2026-09-19T10:00:00Z)
-  [ -z "$out" ] || fail "a successful read after the streak printed: $out"
-  jq -e '.records[0] | .checked_at == "2026-09-19T10:00:00Z" and .missed_since == null and .missed_at == null' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read did not end the miss streak'
-  printf 'offline\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-19T11:00:00Z)
-  [ -z "$out" ] || fail "a new streak's first miss woke: $out"
-  out=$(poll_at 2026-09-20T11:01:00Z)
-  [ "$out" = "$line" ] || fail "a new miss streak past the bound did not wake: $out"
-  pass 'a single miss after a long sleep stays quiet; a miss streak past a day wakes once'
+  [ -z "$out" ] || fail "a successful read after the streak printed: $out"
+  jq -e '.records[0] | .checked_at == "2026-09-19T11:00:00Z" and .missed_since == null and .missed_at == null' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read did not end the miss streak'
+  pass 'polls without network never build a miss streak; a streak with network past a day wakes once'
 }
 
 test_missed_url_rotates_behind_measured_urls() {
@@ -951,7 +962,7 @@ test_miss_keeps_the_failure_count() {
   printf 'down\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ -z "$out" ] || fail "a first failure woke: $out"
-  printf 'offline\n' > "$home/forge/fault"
+  printf 'wave-offline\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "a miss between failures woke: $out"
   jq -e '.records[0] | .checked_at == "2026-09-16T09:00:00Z" and .failures == 1
@@ -1017,9 +1028,9 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
     GH_TOKEN=ghp_firstmatetest HTTPS_PROXY=http://127.0.0.1:1 https_proxy=http://127.0.0.1:1 \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed through a refused proxy'
   [ -z "$out" ] || fail "an unreachable forge woke: $out"
-  jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == "2026-09-16T07:00:00Z" and .missed_at == $now' \
+  jq -e '.records[0] | .error == null and .checked_at == "2026-09-16T07:00:00Z" and .missed_since == null and .missed_at == null' \
     "$home/data/delivery/contributions.json" >/dev/null \
-    || fail "gh's dial failure was not a miss: $(cat "$home/data/delivery/contributions.json")"
+    || fail "gh's dial failure without network changed the record: $(cat "$home/data/delivery/contributions.json")"
   out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed without gh authentication'
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
@@ -1027,7 +1038,7 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
     and (.error | startswith("forge observation unavailable: core: ") and contains("gh auth login"))' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "gh's authentication refusal was not unavailable: $(cat "$home/data/delivery/contributions.json")"
-  pass 'real gh: a dial failure is a miss and an authentication refusal is unavailable'
+  pass 'real gh: a dial failure without network changes nothing and an authentication refusal is unavailable'
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
