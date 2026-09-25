@@ -46,13 +46,12 @@
 # to every owner without another forge read. When the budget runs out
 # mid-observation, the poll ends with that URL's records untouched.
 # A failed observation is classified by whether the forge answered. A read
-# the forge answered with an error (gh names an HTTP status or a GraphQL
-# error, or refuses for authentication with its exit status 4) or with
-# malformed data is unavailable. A read that got no answer - a connection or
-# DNS failure, or the five-second cap - is a miss, as is a head that changed
-# during the read: the host, not the forge, is the usual cause (a sleeping
-# laptop's dark wakes reach no network), so a miss is unmeasured, never a
-# failure. A failed observation is re-read once within the same poll when the
+# that shows it got no answer - gh reports a connection or DNS failure, or
+# the five-second cap ends it - is a miss, as is a head that changed during
+# the read: the host, not the forge, is the usual cause (a sleeping laptop's
+# dark wakes reach no network), so a miss is unmeasured, never a failure.
+# Every other failed read is unavailable: an HTTP or GraphQL error, an
+# authentication refusal, malformed data, or a gh that cannot run the read. A failed observation is re-read once within the same poll when the
 # reservation still fits; the second outcome is the poll's. A miss leaves
 # every owner's record untouched except a missed {at,reason} note, so the
 # observation ages into "not recently checked" fleet work. An unavailable
@@ -223,13 +222,13 @@ forge() {
     # A read killed at the budget's own deadline is budget exhaustion too.
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 124 ] && { [ "$rc" -eq 4 ] || grep -Eq 'HTTP [1-5][0-9]{2}|GraphQL' "$forge_err"; }; then
-    # The forge answered: gh names the HTTP status or GraphQL error it got,
-    # or refuses for authentication (its exit status 4) before asking.
-    forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-unavailable"
-  else
+  elif [ "$rc" -eq 124 ] || grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset' "$forge_err"; then
     # No answer reached this host: a connection or DNS failure, or the cap.
     forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-missed"
+  else
+    # Anything else is a failure the fleet must see: an HTTP or GraphQL
+    # answer, an authentication refusal, or a broken local forge CLI.
+    forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-unavailable"
   fi
   return "$rc"
 }
@@ -260,10 +259,10 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-missed"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-missed"
   FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return "$(forge_class)"
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || { malformed core; return 1; }
   if [ "$kind" = pull ]; then
