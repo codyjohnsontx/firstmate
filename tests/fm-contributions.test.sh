@@ -986,7 +986,8 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
   jq -e --arg now "$NOW" '.records[0] | .error == null and .checked_at == "2026-09-15T08:00:00Z" and .missed_at == $now' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "gh's dial failure was not a miss: $(cat "$home/data/delivery/contributions.json")"
-  out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
+  # Under GITHUB_ACTIONS gh swaps its refusal for an Actions-only hint; keep its ordinary words.
+  out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_ACTIONS HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed without gh authentication'
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
   jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .failures == 1
