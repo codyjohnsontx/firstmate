@@ -49,7 +49,7 @@
 # and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# attempted at most once per poll and its observation applied to every owner.
+# taken up at most once per poll and its observation applied to every owner.
 # A final observation applies to every owner without another forge read. When
 # the budget refuses a read mid-observation, that URL's records stay untouched
 # and the poll moves to the next URL that still has a full observation reserve.
