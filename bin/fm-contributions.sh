@@ -5,7 +5,7 @@
 #   fm-contributions.sh snapshot <input.json> [--all]
 #   fm-contributions.sh poll
 #   fm-contributions.sh pending
-#   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <actor> <summary>
+#   fm-contributions.sh verdict <task> <url> <judged-head> <source-url> <captain|fleet|maintainer|nobody> <summary>
 #   fm-contributions.sh ack <task> <url> <event-token>
 #   fm-contributions.sh arm [--if-owned]
 #
@@ -18,61 +18,67 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, notified tokens,
-# failures (the URL's consecutive unavailable observations) and missed_at (the
-# time of the last unmeasured read since the last completed observation).
+# observation, verdict, seen event tokens, pending events, notified tokens and
+# failures (the URL's consecutive unavailable observations).
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
 # observation's lane names also disclose a lane absent from the next head.
-# A verdict records the EXACT judged head, source URL, actor and summary. A
-# comment's arrival time never supplies its judged head. Record a prose verdict
-# only after its source identifies that head; otherwise leave it unbound and
+# A verdict records the EXACT judged head, source URL, actor and summary. The
+# actor is exactly one of captain, fleet, maintainer or nobody; any other value
+# is refused. A comment's arrival time never supplies its judged head. Record a
+# prose verdict only after its source identifies that head; otherwise leave it unbound and
 # triage its signal. Formal reviews carry GitHub's own commit_id. Neither kind
 # can grant merge authority. Captain-actor prose requires an existing live hold;
 # an eligible merge remains a captain call, never an automatic forge action.
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Every read is capped at five seconds. A pull observation has three
+# 1..25). A configured value rides the generated check shim into watcher runs
+# and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
+# default 30, read from the poll's environment because the watcher runs it as
+# a direct child) with a three-second margin. Every read is capped at five
+# seconds, and a read killed at that bound or at the deadline is budget
+# refusal, never a forge failure. A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
-# an issue has two waves. Parallelizing each independent wave bounds either
-# observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
-# 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
+# an issue has two waves. Before starting a URL, poll reserves the smaller of
+# the effective budget and 15 seconds for those waves. URLs needing forge
+# reads are sorted by URL and rotated by the current five-minute epoch bucket
+# modulo their count, without stored scheduling state or freshness-based
+# reordering. Terminal URLs settle separately before the forge budget starts
+# and consume no rotation slots.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# observed once per poll and applied to every owner. A final observation applies
-# to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched.
+# attempted at most once per poll and its observation applied to every owner.
+# A final observation applies to every owner without another forge read. When
+# the budget refuses a read mid-observation, that URL's records stay untouched
+# and the poll moves to the next URL that still has a full observation reserve.
 # A failed observation is classified by whether the forge answered. A read
-# that shows it got no answer - gh reports a connection or DNS failure, or
-# the five-second cap ends it - is a miss, as is a head that changed during
-# the read: the host, not the forge, is the usual cause (a sleeping laptop's
-# dark wakes reach no network), so a miss is unmeasured, never a failure.
-# Every other failed read is unavailable: an HTTP or GraphQL error, an
-# authentication refusal, malformed data, or a gh that cannot run the read.
-# A failed observation is re-read once within the same poll when the
-# reservation still fits; the second outcome is the poll's. A miss leaves
-# every owner's record untouched except missed_at, so the observation ages
-# into "not recently checked" fleet work while poll order counts the miss as
-# an attempt and reads measured URLs first. An unavailable
-# read records checked_at, error naming the read and the forge's answer, and
-# failures, the URL's consecutive unavailable observations applied to every
-# owner; a miss leaves that count alone.
+# that shows it got no answer - gh reports a connection or DNS failure - is a
+# miss, as is a head that changed during the read: the host, not the forge,
+# is the usual cause (a sleeping laptop's dark wakes reach no network), so a
+# miss is unmeasured, never a failure, and leaves every owner's record
+# untouched exactly like a budget refusal. Every other failed read is
+# unavailable: an HTTP or GraphQL error, an authentication refusal, malformed
+# data, or a gh that cannot run the read. A failed observation is re-read
+# once within the same poll when the reservation still fits; the second
+# outcome is the poll's. An unavailable read records checked_at, error naming
+# the read and the forge's answer, and failures, the URL's consecutive
+# unavailable observations applied to every owner; a miss leaves that count
+# alone.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
-# never re-read, stays fresh, and a stale error beside it is cleared once.
+# never re-read, stays fresh, and every owner's saved row converges on that
+# observation, with a stale error and failure count beside it cleared.
 # The unavailable line prints only when failures reaches exactly two, the
 # second consecutive unavailable observation, so one flaky read never wakes
 # firstmate while a persistent failure still does; a record whose error
 # predates the count is treated as already announced. A miss never wakes,
 # however long it persists: a read that never gets an answer stays quiet and
 # surfaces through the fleet digest's coverage view instead, as bearings'
-# checked/known coverage and "not recently checked" fleet work. Any completed
-# observation clears missed_at; a successful read also ends the failure
-# episode and clears error and failures.
+# checked/known coverage and "not recently checked" fleet work. A successful
+# read ends the failure episode and clears error and failures.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -102,6 +108,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-path-lib.sh
+. "$SCRIPT_DIR/fm-path-lib.sh"
 
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -114,6 +122,11 @@ BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
+BUDGET_CAP=$((CHECK_TIMEOUT - 3))
+[ "$BUDGET_CAP" -ge 1 ] || BUDGET_CAP=1
+[ "$BUDGET" -le "$BUDGET_CAP" ] || BUDGET=$BUDGET_CAP
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
 LOCK_HELD=0
 cleanup() {
@@ -130,7 +143,7 @@ jq_lib() { # jq options/program via final argument
 }
 
 read_saved() {
-  local file
+  local file dir task
   : > "$TMP/saved.jsonl"
   ERRORS=0
   if [ -L "$DATA" ]; then
@@ -138,14 +151,16 @@ read_saved() {
   fi
   for file in "$DATA"/*/contributions.json; do
     [ -e "$file" ] || [ -L "$file" ] || continue
-    if [ -L "$file" ] || [ -L "$(dirname "$file")" ] || [ ! -f "$file" ] \
+    fm_dirname_to dir "$file"
+    fm_basename_to task "$dir"
+    if [ -L "$file" ] || [ -L "$dir" ] || [ ! -f "$file" ] \
       || [ "$(wc -c < "$file")" -gt 1048576 ] \
       || ! jq_lib -ne --slurpfile record "$file" '($record | length) == 1 and ($record[0] | valid_record)' >/dev/null 2>&1; then
       ERRORS=$((ERRORS + 1))
       continue
     fi
     # A file's task identity must match its durable directory, not arbitrary JSON.
-    if ! jq -e --arg task "$(basename "$(dirname "$file")")" '.task == $task' "$file" >/dev/null; then
+    if ! jq -e --arg task "$task" '.task == $task' "$file" >/dev/null; then
       ERRORS=$((ERRORS + 1)); continue
     fi
     jq -c . "$file" >> "$TMP/saved.jsonl"
@@ -205,31 +220,28 @@ write_record() { # task record-json-file
 }
 
 forge_reason() { # read-name stderr-file status: one sanitized line of forge evidence
-  local text=
-  if [ "$3" -eq 124 ]; then
-    text='no answer within the five-second cap'
-  else
-    text=$(head -n 1 "$2" 2>/dev/null | tr -d '\000-\037\177' | cut -c1-200)
-  fi
+  local text
+  text=$(head -n 1 "$2" 2>/dev/null | tr -d '\000-\037\177' | cut -c1-200)
   printf '%s: %s\n' "$1" "${text:-exit status $3}"
 }
 
 forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err} name
+  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err} name
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
+  [ "$remaining" -le 5 ] || remaining=5
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
   [ "$rc" -ne 0 ] || return 0
   name=$(basename "$forge_err" .err)
-  if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
-    # A read killed at the budget's own deadline is budget exhaustion too.
+  if [ "$rc" -eq 124 ]; then
+    # A kill at the read bound or the deadline is budget refusal, never
+    # forge evidence of any kind.
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif [ "$rc" -eq 124 ] || grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset' "$forge_err"; then
-    # No answer reached this host: a connection or DNS failure, or the cap.
+  elif grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset' "$forge_err"; then
+    # No answer reached this host: a connection or DNS failure.
     forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-missed"
   else
     # Anything else is a failure the fleet must see: an HTTP or GraphQL
@@ -269,6 +281,7 @@ observe() { # canonical GitHub URL -> normalized JSON
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
+  BUDGET_EXHAUSTED=0
   FORGE_ERR="$TMP/core.err" forge api "$endpoint" > "$TMP/core.json" || return "$(forge_class)"
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || { malformed core; return 1; }
   if [ "$kind" = pull ]; then
@@ -370,10 +383,11 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
     if jq -e '. == null' "$TMP/old.json" >/dev/null; then
       jq -n --slurpfile final "$TMP/final.json" '
-        $final[0] + {error:null,failures:0,missed_at:null,pending:[],notified:[]}' > "$TMP/row.json"
+        $final[0] + {error:null,failures:0,pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
-    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
-      jq '.error = null | .failures = 0 | .missed_at = null' "$TMP/old.json" > "$TMP/row.json"
+    elif jq -e '(.observation.state | IN("merged","closed") | not) or .error != null' "$TMP/old.json" >/dev/null; then
+      jq -n --slurpfile final "$TMP/final.json" --slurpfile old "$TMP/old.json" '
+        $old[0] + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null,failures:0}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
@@ -388,35 +402,42 @@ poll() {
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .missed_at // .checked_at] | first // "")})
-    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
-    | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
-  DEADLINE=$(( $(date +%s) + BUDGET ))
-  OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
-  BUDGET_EXHAUSTED=0
+    known($input[0];$saved[0])
+    | group_by(.url) | map({url:.[0].url,tasks:(map(.task) | unique)})
+    | .[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+  : > "$TMP/live.tsv"
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
-    [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
     url=${row[0]}
     # A contribution with a final observation is not re-read for any owner.
     if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         . != null and (.observation.state | IN("merged","closed")))' "${row[@]:1}" >/dev/null; then
       settle_final "$url" "${row[@]:1}"
-      continue
+    else
+      (IFS=$'\t'; printf '%s\n' "${row[*]}") >> "$TMP/live.tsv"
     fi
+  done < "$TMP/known.tsv"
+  jq -Rnr --argjson bucket "$((EPOCH / 300))" '
+    [inputs] | if length == 0 then . else ($bucket % length) as $offset | .[$offset:] + .[:$offset] end
+    | .[]' < "$TMP/live.tsv" > "$TMP/known.tsv"
+  DEADLINE=$(( $(date +%s) + BUDGET ))
+  OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
+  while IFS=$'\t' read -r -a row; do
+    [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
+    url=${row[0]}
     observed=0
     observe "$url" || observed=$?
-    # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
-    [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     # One failed observation is re-read once within the poll when a whole
     # observation still fits; a transient miss or error then costs nothing.
     if [ "$observed" -ne 0 ] && [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ]; then
       observed=0
       observe "$url" || observed=$?
-      [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+      [ "$BUDGET_EXHAUSTED" -eq 0 ] || continue
     fi
+    # Unmeasured: every owner's prior observation and failure count stand.
+    [ "$observed" -ne 2 ] || continue
     reason=
     failures=0
     case "$observed" in
@@ -446,17 +467,14 @@ poll() {
           | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
               [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
               else [] end)) as $events
-          | $old + {checked_at:$now,error:null,failures:0,missed_at:null,
+          | $old + {checked_at:$now,error:null,failures:0,
             observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
             seen:($events | map(.token)),
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
-      elif [ "$observed" -eq 1 ]; then
-        jq --arg now "$NOW" --arg reason "${reason:-forge read failed}" --argjson failures "$failures" \
-          '.checked_at=$now | .error=("forge observation unavailable: " + $reason) | .failures=$failures | .missed_at=null' \
-          "$old" > "$TMP/row.json"
       else
-        # Unmeasured: the prior observation and its failure count stand.
-        jq --arg now "$NOW" '.missed_at=$now' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --arg reason "${reason:-forge read failed}" --argjson failures "$failures" \
+          '.checked_at=$now | .error=("forge observation unavailable: " + $reason) | .failures=$failures' \
+          "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
@@ -466,6 +484,7 @@ poll() {
 
 arm() {
   local device staged
+  local -a shim
   acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
@@ -477,11 +496,15 @@ arm() {
   device=$(fm_pr_file_device "$STATE")
   fm_pr_regular_destination_on_device_or_absent "$STATE/contributions.check.sh" "$device" || fail 'unsafe check destination'
   staged=$(umask 077; mktemp "$STATE/.contributions-check.XXXXXX")
-  printf '%s\n' '#!/usr/bin/env bash' \
-    "export FM_HOME=$(printf '%q' "$FM_HOME")" \
-    "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")" \
-    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")" \
-    "exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll" > "$staged"
+  shim=('#!/usr/bin/env bash'
+    "export FM_HOME=$(printf '%q' "$FM_HOME")"
+    "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")"
+    "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")")
+  if [ -n "${FM_CONTRIBUTIONS_BUDGET:-}" ]; then
+    shim+=("export FM_CONTRIBUTIONS_BUDGET=$(printf '%q' "$FM_CONTRIBUTIONS_BUDGET")")
+  fi
+  shim+=("exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll")
+  printf '%s\n' "${shim[@]}" > "$staged"
   chmod 700 "$staged"
   mv -f -- "$staged" "$STATE/contributions.check.sh"
   "$SCRIPT_DIR/fm-check-register.sh" contributions
@@ -516,7 +539,7 @@ case "${1:-}" in
     else
       [ "$#" -eq 4 ] || fail 'verdict needs judged-head, source-url, actor and summary'
       fm_pr_head_valid "$1" || fail 'an exact judged commit is required'
-      case "$3" in captain|fleet|maintainer|nobody) ;; *) fail 'invalid required actor' ;; esac
+      case "$3" in captain|fleet|maintainer|nobody) ;; *) fail "invalid required actor '$3'; expected one of: captain, fleet, maintainer, nobody" ;; esac
       case "$2" in "$url"\#*) ;; *) fail 'verdict source must be a comment or review on this contribution' ;; esac
       jq --arg head "$1" --arg source "$2" --arg actor "$3" --arg summary "$4" \
         '.verdict={head:$head,source:$source,actor:$actor,summary:$summary}' "$TMP/row.json" > "$TMP/update.json"
