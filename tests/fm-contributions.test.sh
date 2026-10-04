@@ -659,9 +659,13 @@ case "$fault:$*" in
     [ -e "$FORGE/blipped" ] || { : > "$FORGE/blipped"; printf 'HTTP 502\n' >&2; exit 1; } ;;
   head-once:'pr view '*)
     [ -e "$FORGE/blipped" ] || { : > "$FORGE/blipped"; printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0; } ;;
+  slow-once:'api repos/o/r/pulls/8')
+    [ -e "$FORGE/blipped" ] || { : > "$FORGE/blipped"; sleep 6; } ;;
   # No forge answer, in gh's own words: a DNS failure and a dial failure.
   offline:*) printf 'error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n' >&2; exit 1 ;;
   unreachable:*) printf 'Get "https://api.github.com/%s": dial tcp: connect: network is unreachable\n' "$2" >&2; exit 1 ;;
+  # The connection closed before any forge answer arrived.
+  eof:*) printf 'Get "https://api.github.com/%s": EOF\n' "$2" >&2; exit 1 ;;
   noauth:*) printf 'To get started with GitHub CLI, please run:  gh auth login\n' >&2; exit 4 ;;
   garbled:*) printf 'unexpected end of JSON input\n' >&2; exit 1 ;;
 esac
@@ -919,7 +923,7 @@ test_three_second_pr_reads_complete_fresh_in_one_cycle() { # 3-second reads: 8 s
   pass 'eight 3-second PR reads complete fresh within one 20-second poll cycle'
 }
 
-test_slow_read_deadline_kill_is_budget_refusal() {
+test_slow_read_past_the_read_bound_is_a_miss() {
   local home out
   home=$(new_home slow-kill)
   forge_home "$home"
@@ -929,12 +933,14 @@ test_slow_read_deadline_kill_is_budget_refusal() {
   /bin/date +%s > "$home/forge/clock"
   printf 'latency\n' > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_LATENCY=6 "$ROOT/bin/fm-contributions.sh" poll) \
-    || fail 'poll failed on a deadline-killed slow read'
-  [ -z "$out" ] || fail "a deadline-killed slow read printed an unavailable wake: $out"
+    || fail 'poll failed on a slow read killed at the read bound'
+  [ -z "$out" ] || fail "a slow read killed at the read bound printed an unavailable wake: $out"
+  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
+    || fail 'a slow read killed at the read bound was not re-read exactly once'
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail 'a deadline-killed slow read rewrote the prior record'
-  [ ! -s "$home/state/.wake-queue" ] || fail 'a deadline-killed slow read enqueued a wake'
-  pass 'a read killed at the five-second bound is budget refusal and stays silent'
+    || fail 'a slow read killed at the read bound rewrote the prior record'
+  [ ! -s "$home/state/.wake-queue" ] || fail 'a slow read killed at the read bound enqueued a wake'
+  pass 'a read killed at the five-second bound with budget left is a miss: re-read once, then unmeasured and silent'
 }
 
 test_unmeasured_url_does_not_starve_the_tail() {
@@ -1107,13 +1113,15 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   pass 'a genuinely unavailable forge records an error and wakes once per failure episode, on its second failure'
 }
 
-test_transient_read_failure_is_reread_within_the_poll() { # one 502, then one head change, each once
+test_transient_read_failure_is_reread_within_the_poll() { # one 502, one head change, one read past its bound, each once
   local mode home out
-  for mode in blip head-once; do
+  for mode in blip head-once slow-once; do
     home=$(new_home "reread-$mode")
     forge_home "$home"
     wrap_forge "$home"
     mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+    # A frozen clock keeps a whole observation's reserve after the capped read.
+    /bin/date +%s > "$home/forge/clock"
     printf '%s\n' "$mode" > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "poll failed across a transient read failure ($mode)"
     [ -z "$out" ] || fail "a transient read failure woke ($mode): $out"
@@ -1127,9 +1135,9 @@ test_transient_read_failure_is_reread_within_the_poll() { # one 502, then one he
   pass 'a transient read failure is re-read once within the poll and leaves a fresh observation'
 }
 
-test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure and dial failure
+test_unanswered_read_is_a_miss_not_a_failure() { # DNS failure, dial failure and closed connection
   local mode home out
-  for mode in offline unreachable; do
+  for mode in offline unreachable eof; do
     home=$(new_home "miss-$mode")
     forge_home "$home"
     wrap_forge "$home"
@@ -1279,7 +1287,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_deadline_kill_is_budget_refusal test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_verdict_actor_values_are_discoverable test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_record_task_identity_matches_dirname_basename test_read_only_views_create_no_state test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_interrupted_multi_owner_poll_settles_every_owner test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_read_past_the_read_bound_is_a_miss test_unmeasured_url_does_not_starve_the_tail test_budget_is_cut_down_to_the_watcher_check_bound test_arm_plumbs_a_configured_budget_into_the_check_shim test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_transient_read_failure_is_reread_within_the_poll test_unanswered_read_is_a_miss_not_a_failure test_miss_keeps_the_failure_count test_auth_refusal_is_unavailable test_unrecognized_failure_is_unavailable test_real_gh_classifies_no_answer_and_no_auth; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

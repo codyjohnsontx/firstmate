@@ -38,8 +38,9 @@
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
 # a direct child) with a three-second margin. Every read is capped at five
-# seconds, and a read killed at that bound or at the deadline is budget
-# refusal, never a forge failure. A pull observation has three
+# seconds or the deadline, whichever comes first. A read killed at the
+# deadline is budget refusal, never a forge failure; one killed at the
+# five-second bound is a miss (below). A pull observation has three
 # dependent waves: core, six independent reads, then the closing head read;
 # an issue has two waves. Before starting a URL, poll reserves the smaller of
 # the effective budget and 15 seconds for those waves. URLs needing forge
@@ -54,9 +55,11 @@
 # the budget refuses a read mid-observation, that URL's records stay untouched
 # and the poll moves to the next URL that still has a full observation reserve.
 # A failed observation is classified by whether the forge answered. A read
-# that shows it got no answer - gh reports a connection or DNS failure - is a
-# miss, as is a head that changed during the read: the host, not the forge,
-# is the usual cause (a sleeping laptop's dark wakes reach no network), so a
+# that shows it got no answer - gh reports a connection, DNS or
+# closed-connection (EOF) failure, or the read hits its five-second bound
+# before the deadline - is a miss, as is a head that changed during the
+# read: the host, not the forge, is the usual cause (a sleeping laptop's
+# dark wakes reach no network), so a
 # miss is unmeasured, never a failure, and leaves every owner's record
 # untouched exactly like a budget refusal. Every other failed read is
 # unavailable: an HTTP or GraphQL error, an authentication refusal, malformed
@@ -219,21 +222,21 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining at_deadline=1 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  [ "$remaining" -le 5 ] || remaining=5
+  [ "$remaining" -le 5 ] || { remaining=5; at_deadline=0; }
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
   [ "$rc" -ne 0 ] || return 0
-  if [ "$rc" -eq 124 ]; then
-    # A kill at the read bound or the deadline is budget refusal, never
-    # forge evidence of any kind.
+  if [ "$rc" -eq 124 ] && [ "$at_deadline" -eq 1 ]; then
+    # A kill at the deadline is budget refusal, never forge evidence.
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
-  elif grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset' "$forge_err"; then
-    # No answer reached this host: a connection or DNS failure.
+  elif [ "$rc" -eq 124 ] || grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset|: EOF|unexpected EOF|broken pipe|closed network connection|server closed idle connection|connection lost' "$forge_err"; then
+    # No answer reached this host: the five-second read bound with budget
+    # left, or a connection, DNS or closed-connection failure.
     : > "$TMP/forge-missed"
   else
     # Anything else is a failure the fleet must see: an HTTP or GraphQL
