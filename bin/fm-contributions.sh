@@ -242,7 +242,7 @@ forge() {
     : > "$TMP/budget-exhausted"
   elif grep -Eqi 'error connecting to|dial tcp|no such host|connection refused|network is unreachable|i/o timeout|TLS handshake timeout|connection reset' "$forge_err"; then
     # No answer reached this host: a connection or DNS failure.
-    forge_reason "$name" "$forge_err" "$rc" >> "$TMP/forge-missed"
+    : > "$TMP/forge-missed"
   else
     # Anything else is a failure the fleet must see: an HTTP or GraphQL
     # answer, an authentication refusal, or a broken local forge CLI.
@@ -303,7 +303,7 @@ observe() { # canonical GitHub URL -> normalized JSON
     FORGE_ERR="$TMP/head.err" forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return "$(forge_class)"
     after=$(jq -er .headRefOid "$TMP/after.json") || { malformed head; return 1; }
     # A push that lands mid-read is a race, not forge evidence: unmeasured.
-    [ "$head" = "$after" ] || { printf 'head: changed during observation\n' >> "$TMP/forge-missed"; return 2; }
+    [ "$head" = "$after" ] || return 2
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
