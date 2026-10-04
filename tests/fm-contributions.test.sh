@@ -711,14 +711,14 @@ test_genuine_failure_near_deadline_is_unavailable() {
   out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed on a genuine forge failure'
   [ -z "$out" ] || fail "a first genuine forge failure woke before a second confirmed it: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now and .records[0].failures == 1
-    and .records[0].error == "forge observation unavailable: reviews: HTTP 502"' \
+    and .records[0].error == "forge observation unavailable"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 1 ] \
     || fail 'a failure past the deadline was re-read without room for a whole observation'
   /bin/date +%s > "$home/forge/clock"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$later" "$ROOT/bin/fm-contributions.sh" poll) \
     || fail 'second poll failed on a genuine forge failure'
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 (reviews: HTTP 502)' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a second consecutive genuine forge failure was swallowed: $out"
   jq -e --arg now "$later" '.records[0].checked_at == $now and .records[0].failures == 2' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'the second failure did not count'
@@ -744,7 +744,7 @@ test_shared_url_observed_once() {
         ok) jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null and .failures == 0' \
           "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)" ;;
         fail) jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .failures == 1
-            and .error == "forge observation unavailable: reviews: HTTP 502"' \
+            and .error == "forge observation unavailable"' \
           "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared failure ($mode)" ;;
         # A miss writes nothing: the first owner keeps its head and the late owner has no record yet.
         head) if [ "$task" = delivery ]; then
@@ -1065,8 +1065,8 @@ test_arm_plumbs_a_configured_budget_into_the_check_shim() {
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage across consecutive cycles
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8 (core: HTTP 502)'
-  local error='"forge observation unavailable: core: HTTP 502"'
+  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
+  local error='"forge observation unavailable"'
   home=$(new_home failure-episode)
   forge_home "$home"
   wrap_forge "$home"
@@ -1164,7 +1164,7 @@ test_miss_keeps_the_failure_count() {
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ -z "$out" ] || fail "a first failure woke: $out"
   jq -e '.records[0] | .checked_at == "2026-09-16T09:00:00Z" and .failures == 1
-    and .error == "forge observation unavailable: core: HTTP 502"' \
+    and .error == "forge observation unavailable"' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'the first failure left no error evidence'
   cp "$home/data/delivery/contributions.json" "$home/failed.json"
   printf 'offline\n' > "$home/forge/fault"
@@ -1173,7 +1173,7 @@ test_miss_keeps_the_failure_count() {
   cmp -s "$home/failed.json" "$home/data/delivery/contributions.json" || fail 'a miss disturbed the recorded failure'
   printf 'down\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 (core: HTTP 502)' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "the failure after a miss did not continue the episode: $out"
   jq -e '.records[0].failures == 2' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'the failure after a miss did not count as consecutive'
@@ -1190,7 +1190,7 @@ test_auth_refusal_is_unavailable() {
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
   out=$(poll_at 2026-09-16T10:00:00Z)
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 (core: To get started with GitHub CLI, please run:  gh auth login)' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a persistent authentication refusal did not wake: $out"
   pass 'a forge CLI that refuses for authentication is a failure the fleet must fix, not a miss'
 }
@@ -1205,11 +1205,11 @@ test_unrecognized_failure_is_unavailable() {
   out=$(poll_at 2026-09-16T09:00:00Z)
   [ -z "$out" ] || fail "a first unrecognized failure woke: $out"
   jq -e '.records[0] | .checked_at == "2026-09-16T09:00:00Z" and .failures == 1
-    and .error == "forge observation unavailable: core: unexpected end of JSON input"' \
+    and .error == "forge observation unavailable"' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "an unrecognized failure was not unavailable: $(cat "$home/data/delivery/contributions.json")"
   out=$(poll_at 2026-09-16T10:00:00Z)
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8 (core: unexpected end of JSON input)' ] \
+  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
     || fail "a persistent unrecognized failure did not wake: $out"
   pass 'a failed read without evidence of no answer is unavailable, so a persistent one still wakes'
 }
@@ -1239,15 +1239,15 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed without gh authentication'
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
   jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .failures == 1
-    and (.error | startswith("forge observation unavailable: core: ") and contains("gh auth login"))' \
+    and .error == "forge observation unavailable"' \
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail "gh's authentication refusal was not unavailable: $(cat "$home/data/delivery/contributions.json")"
   pass 'real gh: a dial failure is a miss and an authentication refusal is unavailable'
 }
 
 test_late_owner_keeps_failure_episode_suppressed() {
-  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8 (core: HTTP 502)'
-  local error='forge observation unavailable: core: HTTP 502' task
+  local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
+  local error='forge observation unavailable' task
   home=$(new_home late-owner-failure-episode)
   forge_home "$home"
   wrap_forge "$home"
