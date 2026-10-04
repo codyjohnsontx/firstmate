@@ -1234,8 +1234,7 @@ test_real_gh_classifies_no_answer_and_no_auth() { # the classifier against gh's 
   [ -z "$out" ] || fail "an unreachable forge woke: $out"
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail "gh's dial failure was not a miss: $(cat "$home/data/delivery/contributions.json")"
-  # Under CI or GITHUB_ACTIONS gh swaps its refusal for an automation-only hint; keep its ordinary words.
-  out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN -u CI -u GITHUB_ACTIONS HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
+  out=$(with_home "$home" env -u GITHUB_TOKEN -u GH_TOKEN HOME="$gh_home" GH_CONFIG_DIR="$gh_home" \
     "$ROOT/bin/fm-contributions.sh" poll) || fail 'poll failed without gh authentication'
   [ -z "$out" ] || fail "a first authentication refusal woke: $out"
   jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .failures == 1
